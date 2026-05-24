@@ -10,7 +10,7 @@ include(CMakePackageConfigHelpers)
 
 find_package(Threads REQUIRED)
 
-set(LIBUARM_SOURCES
+set(LIBSWIFTPRO_SOURCES
     src/swiftpro.cc
     src/commander.cc
     src/receiver.cc
@@ -20,11 +20,11 @@ set(LIBUARM_SOURCES
     src/serial/impl/list_ports/list_ports_linux.cc
 )
 
-add_library(uarm        SHARED ${LIBUARM_SOURCES})
-add_library(uarm_static STATIC ${LIBUARM_SOURCES})
-set_target_properties(uarm_static PROPERTIES OUTPUT_NAME uarm)
+add_library(swiftpro        SHARED ${LIBSWIFTPRO_SOURCES})
+add_library(swiftpro_static STATIC ${LIBSWIFTPRO_SOURCES})
+set_target_properties(swiftpro_static PROPERTIES OUTPUT_NAME swiftpro)
 
-foreach(_target uarm uarm_static)
+foreach(_target swiftpro swiftpro_static)
     target_compile_options(${_target} PRIVATE -Wall -Wextra -Wpedantic)
     target_include_directories(${_target}
         PUBLIC
@@ -40,7 +40,7 @@ if(BUILD_EXAMPLES)
 endif()
 
 install(
-    TARGETS uarm uarm_static
+    TARGETS swiftpro swiftpro_static
     EXPORT libswiftproTargets
     LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -48,20 +48,20 @@ install(
 )
 
 install(
-    DIRECTORY include/uarm include/serial
+    DIRECTORY include/swiftpro include/serial
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 install(
     EXPORT libswiftproTargets
     NAMESPACE libswiftpro::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libuarm
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libswiftpro
 )
 
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/libswiftproConfig.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/libswiftproConfig.cmake"
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libuarm
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libswiftpro
 )
 
 write_basic_package_version_file(
@@ -74,5 +74,5 @@ install(
     FILES
         "${CMAKE_CURRENT_BINARY_DIR}/libswiftproConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/libswiftproConfigVersion.cmake"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libuarm
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libswiftpro
 )

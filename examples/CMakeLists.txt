@@ -12,5 +12,5 @@ foreach(_target
     teach_playback
     teach_playback_smooth
     teach_playback_joint)
-    target_link_libraries(${_target} PRIVATE uarm)
+    target_link_libraries(${_target} PRIVATE swiftpro)
 endforeach()
