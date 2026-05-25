@@ -30,9 +30,14 @@ static std::vector<std::string> split(const std::string& s)
 // Returns false on failure.
 static bool parse_prefixed_float(const std::string& tok, float& out)
 {
-    if (tok.size() < 2) { return false; }
+    // Strip leading alphabetic prefix (e.g. "X", "AR", "Yaw").
+    size_t i = 0;
+    while (i < tok.size() && std::isalpha(static_cast<unsigned char>(tok[i]))) {
+        ++i;
+    }
+    if (i == 0 || i == tok.size()) { return false; }
     try {
-        out = std::stof(tok.substr(1));
+        out = std::stof(tok.substr(i));
         return true;
     } catch (...) {
         return false;
@@ -42,9 +47,14 @@ static bool parse_prefixed_float(const std::string& tok, float& out)
 // Parse a token of the form "V42" — strip first char, parse int.
 static bool parse_prefixed_int(const std::string& tok, int& out)
 {
-    if (tok.size() < 2) { return false; }
+    // Strip leading alphabetic prefix (e.g. "V", "N", "AR").
+    size_t i = 0;
+    while (i < tok.size() && std::isalpha(static_cast<unsigned char>(tok[i]))) {
+        ++i;
+    }
+    if (i == 0 || i == tok.size()) { return false; }
     try {
-        out = std::stoi(tok.substr(1));
+        out = std::stoi(tok.substr(i));
         return true;
     } catch (...) {
         return false;
