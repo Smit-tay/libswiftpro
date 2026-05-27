@@ -28,7 +28,11 @@ void Commander::start()
 void Commander::stop()
 {
     if (!running_.exchange(false)) { return; }
+
+    // Wake the writer thread out of either CV.
     queue_cv_.notify_all();
+    pending_cv_.notify_all();
+
     if (writer_thread_.joinable()) { writer_thread_.join(); }
 
     // Drain pending map — fire all outstanding callbacks with a timeout error.
@@ -57,7 +61,8 @@ void Commander::send(const std::string& cmd, ResponseCallback cb)
         std::lock_guard<std::mutex> lock(queue_mutex_);
 
         if (queue_.size() >= QUEUE_CAPACITY) {
-            // Evict oldest entry to avoid blocking the caller.
+            // Outbound queue full — evict oldest. This is honest because
+            // the firmware never saw the evicted command.
             std::cerr << "[uarm::Commander] queue full — evicting oldest command: "
                       << queue_.front().cmd << "\n";
             auto& evicted = queue_.front();
@@ -90,6 +95,8 @@ Result<std::string> Commander::send_sync(const std::string& cmd, float timeout_s
                         + std::chrono::duration<float>(timeout_s);
 
     if (future.wait_until(deadline) == std::future_status::timeout) {
+        // Note: pending map entry may still be live and will be cleaned up
+        // when the firmware finally responds (or at Commander::stop()).
         return Result<std::string>::err("TIMEOUT");
     }
 
@@ -106,6 +113,11 @@ bool Commander::deliver_response(uint32_t seq, bool ok, const std::string& respo
         cb = std::move(it->second);
         pending_.erase(it);
     }
+
+    // A slot just opened in the pending map — wake the writer thread if it
+    // was back-pressured waiting for one.
+    pending_cv_.notify_one();
+
     if (cb) { cb(ok, response); }
     return true;
 }
@@ -122,6 +134,7 @@ void Commander::writer_loop()
     while (running_) {
         PendingCmd entry;
 
+        // Step 1 — wait for a command on the outbound queue.
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
             queue_cv_.wait(lock, [this] {
@@ -135,24 +148,27 @@ void Commander::writer_loop()
             queue_.pop_front();
         }
 
-        // Register callback in pending map before writing — avoids a race
-        // where the firmware responds before we register.
+        // Step 2 — for sequenced commands, reserve a slot in the pending map.
+        // If the map is at capacity, wait for a response to free one.
+        // This back-pressures the writer to firmware throughput without
+        // issuing false TIMEOUT errors to callers.
         if (entry.cb && entry.seq != 0) {
-            std::lock_guard<std::mutex> lock(pending_mutex_);
+            std::unique_lock<std::mutex> lock(pending_mutex_);
 
-            if (pending_.size() >= PENDING_CAPACITY) {
-                // Evict oldest pending entry.
-                auto oldest = pending_.begin();
-                std::cerr << "[uarm::Commander] pending map full — evicting seq "
-                          << oldest->first << "\n";
-                if (oldest->second) { oldest->second(false, "TIMEOUT"); }
-                pending_.erase(oldest);
+            pending_cv_.wait(lock, [this] {
+                return pending_.size() < PENDING_CAPACITY || !running_;
+            });
+
+            if (!running_) {
+                // Shutting down — fire the callback with timeout and bail.
+                if (entry.cb) { entry.cb(false, "TIMEOUT"); }
+                return;
             }
 
             pending_[entry.seq] = std::move(entry.cb);
         }
 
-        // Write to serial. Append newline if not present.
+        // Step 3 — write to serial. Append newline if not present.
         std::string line = entry.cmd;
         if (line.empty() || line.back() != '\n') { line += '\n'; }
 
@@ -161,14 +177,20 @@ void Commander::writer_loop()
         } catch (const std::exception& e) {
             std::cerr << "[uarm::Commander] serial write error: " << e.what() << "\n";
 
-            // Fire the callback with an error if it was registered.
+            // Fire the callback with an error if it was registered, and
+            // remove the pending entry so the slot is recycled.
             if (entry.seq != 0) {
-                std::lock_guard<std::mutex> lock(pending_mutex_);
-                auto it = pending_.find(entry.seq);
-                if (it != pending_.end()) {
-                    if (it->second) { it->second(false, "IO_ERROR"); }
-                    pending_.erase(it);
+                ResponseCallback cb;
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    auto it = pending_.find(entry.seq);
+                    if (it != pending_.end()) {
+                        cb = std::move(it->second);
+                        pending_.erase(it);
+                    }
                 }
+                pending_cv_.notify_one();
+                if (cb) { cb(false, "IO_ERROR"); }
             }
         }
     }

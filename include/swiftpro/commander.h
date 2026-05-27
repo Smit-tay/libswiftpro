@@ -12,8 +12,16 @@
 //     number. The Receiver calls deliver_response() when a response arrives.
 //   - send_sync() wraps send() with a std::promise/future for callers that
 //     need a blocking call.
-//   - Queue capacity is fixed. If full, the oldest unacknowledged entry is
-//     evicted with a warning. Callers are never blocked.
+//
+// Back-pressure model:
+//   - Outbound queue has fixed capacity (QUEUE_CAPACITY). When full, send()
+//     evicts the oldest unwritten command and fires its callback with
+//     "QUEUE_FULL". Caller is never blocked.
+//   - Pending map has fixed capacity (PENDING_CAPACITY). When full, the writer
+//     thread waits on pending_cv_ until a response arrives and frees a slot.
+//     This back-pressures the writer to firmware throughput without ever
+//     issuing false TIMEOUT errors to callers whose commands the firmware
+//     is actually processing.
 
 #pragma once
 
@@ -100,8 +108,10 @@ private:
     std::condition_variable queue_cv_;
 
     // Pending map — commands written but not yet responded to.
+    // pending_cv_ signals when the map drops below capacity (writer wakes).
     std::unordered_map<uint32_t, ResponseCallback> pending_;
-    std::mutex                                      pending_mutex_;
+    std::mutex                                     pending_mutex_;
+    std::condition_variable                        pending_cv_;
 
     std::thread       writer_thread_;
     std::atomic<bool> running_{false};
