@@ -100,6 +100,7 @@ Swift::~Swift()
 
 bool Swift::connect(const std::string& port, uint32_t baudrate)
 {
+    disconnect();
     try {
         ser_.setPort(port);
         ser_.setBaudrate(baudrate);
