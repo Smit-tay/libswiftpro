@@ -1,6 +1,9 @@
+// Copyright 2026 Jack Sidman Smith
+// Licensed under the MIT License. See LICENSE in project root.
+//
 // teach_playback_smooth.cc — replay a teach recording with trajectory
 // simplification via Ramer-Douglas-Peucker, then smooth playback via
-// GRBL junction blending.
+// the planner's junction blending.
 //
 // Usage: teach_playback_smooth [port] [input_file] [speed_factor] [rdp_tolerance_mm]
 //   port              defaults to /dev/ttyACM0
@@ -30,8 +33,6 @@
 // ---------------------------------------------------------------------------
 
 static constexpr int64_t LOOKAHEAD_MS               = 500;
-static constexpr float   JUNCTION_DEVIATION_SMOOTH  = 0.5f;
-static constexpr float   JUNCTION_DEVIATION_DEFAULT = 0.050f;
 
 // ---------------------------------------------------------------------------
 
@@ -160,6 +161,12 @@ static std::vector<Sample> rdp_simplify(const std::vector<Sample>& samples,
 
 // ---------------------------------------------------------------------------
 
+// F is 80 deg/min of joint-space speed per unit. At about 200 mm reach 1 deg is
+// about 3.5 mm, so 1 F is roughly 280 mm/min. An estimate: playback timing comes
+// from the sleeps, and this only has to be near. F100 is the firmware's default.
+static constexpr float MM_PER_MIN_PER_F = 280.0f;
+static constexpr float MAX_PLAYBACK_F   = 100.0f;
+
 static float sample_speed(const Sample& a, const Sample& b, float speed_factor)
 {
     const int64_t dt_ms = b.t_ms - a.t_ms;
@@ -169,7 +176,7 @@ static float sample_speed(const Sample& a, const Sample& b, float speed_factor)
     const float dz   = b.z - a.z;
     const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
     const float mms  = dist / (dt_ms / 1000.0f);
-    return std::clamp(mms * 60.0f * speed_factor, 10.0f, 5000.0f);
+    return std::clamp(mms * 60.0f * speed_factor / MM_PER_MIN_PER_F, 1.0f, MAX_PLAYBACK_F);
 }
 
 // ---------------------------------------------------------------------------
@@ -212,9 +219,6 @@ int main(int argc, char* argv[])
 
     arm.set_motion_report_sync(true);
 
-    // Increase junction deviation.
-    std::cout << "Setting $11=" << JUNCTION_DEVIATION_SMOOTH << "...\n";
-    arm.send_raw_sync("$11=" + std::to_string(JUNCTION_DEVIATION_SMOOTH));
 
     // Move to start.
     std::cout << "Moving to start position...\n";
@@ -222,6 +226,7 @@ int main(int argc, char* argv[])
                           samples.front().y,
                           samples.front().z, 50.0f);
     arm.set_wrist_sync(samples.front().w, 1000.0f);
+    arm.set_streaming_sync(true);
     std::cout << "At start. Beginning smooth playback...\n\n";
 
     // -----------------------------------------------------------------------
@@ -289,8 +294,9 @@ int main(int argc, char* argv[])
     // Cleanup — always runs regardless of how we exit the loop.
     // -----------------------------------------------------------------------
 
-    std::cout << "Restoring $11=" << JUNCTION_DEVIATION_DEFAULT << "...\n";
-    arm.send_raw_sync("$11=" + std::to_string(JUNCTION_DEVIATION_DEFAULT));
+
+    // A non-motion command is answered once the arm is idle.
+    arm.set_streaming_sync(false, 60.0f);
 
     arm.disconnect();
     std::cout << "Done.\n";

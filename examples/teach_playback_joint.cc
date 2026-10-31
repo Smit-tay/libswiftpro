@@ -1,3 +1,6 @@
+// Copyright 2026 Jack Sidman Smith
+// Licensed under the MIT License. See LICENSE in project root.
+//
 // teach_playback_joint.cc — replay a joint-space teach recording with
 // cosine interpolation and windowed pipeline flow control.
 //
@@ -12,12 +15,12 @@
 // Flow control — windowed pipeline:
 //   Up to `window` G2206 commands are in-flight simultaneously. Each time a
 //   firmware "ok" is received, the next command is sent to refill the pipeline.
-//   This keeps the GRBL planner buffer primed for junction blending (smooth
+//   This keeps the firmware planner buffer primed for junction blending (smooth
 //   motion) while preventing serial buffer overflow (deterministic ordering).
 //
 //   window=1  → one command at a time, perfectly faithful but ~2x too slow
-//   window=4  → 4 commands queued, GRBL blends junctions, near real-time speed
-//   window=24 → full planner buffer, maximum smoothness, fastest playback
+//   window=4  → 4 commands queued, the planner blends junctions, near real-time speed
+//   window=16 → the library's in-flight limit, maximum smoothness, fastest playback
 //
 // Stationary filter:
 //   Consecutive samples where all joints differ by less than STATIONARY_THRESHOLD
@@ -356,8 +359,8 @@ int main(int argc, char* argv[])
         std::cerr << "speed_factor must be > 0\n";
         return 1;
     }
-    if (window < 1 || window > 24) {
-        std::cerr << "window must be 1-24\n";
+    if (window < 1 || window > 16) {
+        std::cerr << "window must be 1-16\n";
         return 1;
     }
     std::cout << "Interpolation: "
@@ -420,6 +423,7 @@ int main(int argc, char* argv[])
     std::cout << "Moving to start position...\n";
     const auto& first = trajectory.front();
     arm.set_joint_angles_sync(first.b, first.l, first.r, 20.0f);
+    arm.set_streaming_sync(true);
     std::cout << "At start. Beginning playback...\n\n";
 
     // Create state and prime the pipeline.
@@ -434,6 +438,9 @@ int main(int argc, char* argv[])
         std::unique_lock<std::mutex> lock(state->done_mutex);
         state->done_cv.wait(lock, [&] { return state->done.load(); });
     }
+
+    // A non-motion command is answered once the arm is idle.
+    arm.set_streaming_sync(false, 60.0f);
 
     std::cout << "\n\nPlayback complete.\n";
     arm.disconnect();

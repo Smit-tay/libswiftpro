@@ -115,6 +115,12 @@ void Receiver::on_power(PowerCallback cb)
     cb_power_ = std::move(cb);
 }
 
+void Receiver::on_lost_steps(LostStepsCallback cb)
+{
+    std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    cb_lost_steps_ = std::move(cb);
+}
+
 // ---------------------------------------------------------------------------
 // Recv loop
 // ---------------------------------------------------------------------------
@@ -124,13 +130,9 @@ void Receiver::recv_loop()
     std::string buf;
 
     while (running_) {
+        // Read available bytes into buffer. A serial error means the link is
+        // gone: the port stays "open" until someone closes it, so say so here.
         try {
-            if (!ser_.isOpen()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                continue;
-            }
-
-            // Read available bytes into buffer.
             const size_t avail = ser_.available();
             if (avail == 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -140,25 +142,31 @@ void Receiver::recv_loop()
             std::string chunk;
             ser_.read(chunk, avail);
             buf += chunk;
+        } catch (const std::exception& e) {
+            std::cerr << "[swiftpro::Receiver] serial link lost: " << e.what() << "\n";
+            link_lost_ = true;
+            commander_.fail_pending("DISCONNECTED");
+            return;
+        }
 
-            // Process complete lines.
-            size_t pos;
-            while ((pos = buf.find('\n')) != std::string::npos) {
-                std::string line = buf.substr(0, pos);
-                buf.erase(0, pos + 1);
+        // Process complete lines.
+        size_t pos;
+        while ((pos = buf.find('\n')) != std::string::npos) {
+            std::string line = buf.substr(0, pos);
+            buf.erase(0, pos + 1);
 
-                // Strip carriage return if present.
-                if (!line.empty() && line.back() == '\r') {
-                    line.pop_back();
-                }
+            // Strip carriage return if present.
+            if (!line.empty() && line.back() == '\r') {
+                line.pop_back();
+            }
 
-                if (!line.empty()) {
+            if (!line.empty()) {
+                try {
                     dispatch_line(line);
+                } catch (const std::exception& e) {
+                    std::cerr << "[swiftpro::Receiver] callback error: " << e.what() << "\n";
                 }
             }
-        } catch (const std::exception& e) {
-            std::cerr << "[uarm::Receiver] error: " << e.what() << "\n";
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
 }
@@ -198,7 +206,7 @@ void Receiver::dispatch_response(const std::string& line)
         const bool ok = (payload.rfind("ok", 0) == 0);
 
         if (!commander_.deliver_response(seq, ok, payload)) {
-            std::cerr << "[uarm::Receiver] unmatched seq " << seq
+            std::cerr << "[swiftpro::Receiver] unmatched seq " << seq
                       << " response: " << payload << "\n";
         }
         return;
@@ -220,8 +228,9 @@ void Receiver::dispatch_event(const std::string& line)
 
     switch (event_id) {
         case 1:
-            // @1 — boot complete. No callback — just log.
-            std::cerr << "[uarm] firmware boot complete\n";
+            // @1 — boot complete. Whatever was in flight died with the old boot.
+            std::cerr << "[swiftpro] firmware boot complete\n";
+            commander_.fail_pending("FIRMWARE_RESET");
             break;
         case 3:
             parse_at3(payload);
@@ -232,11 +241,14 @@ void Receiver::dispatch_event(const std::string& line)
         case 6:
             parse_at6(payload);
             break;
+        case 8:
+            parse_at8(payload);
+            break;
         case 9:
             parse_at9(payload);
             break;
         default:
-            std::cerr << "[uarm::Receiver] unknown event: " << line << "\n";
+            std::cerr << "[swiftpro::Receiver] unknown event: " << line << "\n";
             break;
     }
 }
@@ -245,12 +257,9 @@ void Receiver::dispatch_event(const std::string& line)
 // Event parsers
 // ---------------------------------------------------------------------------
 
-// @3 X<x> Y<y> Z<z> R<wrist> [B<base> L<left> AR<right>]
+// @3 X<x> Y<y> Z<z> R<wrist> B<base> L<left> AR<right> M<j><deg> [A<ms>] T<ms> S<n>
 //
-// Current firmware: 4 tokens (X Y Z R)
-// Extended firmware (planned): 7 tokens (X Y Z R B L AR)
-//
-// The parser handles both forms gracefully.
+// Only the first seven fields are used; the token count varies after them.
 void Receiver::parse_at3(const std::string& payload)
 {
     const auto tokens = split(payload);
@@ -303,6 +312,21 @@ void Receiver::parse_at6(const std::string& payload)
 
     std::lock_guard<std::mutex> lock(callbacks_mutex_);
     if (cb_limit_switch_) { cb_limit_switch_(val != 0); }
+}
+
+// @8 N<joint> V<error deg>
+void Receiver::parse_at8(const std::string& payload)
+{
+    const auto tokens = split(payload);
+    if (tokens.size() < 2) { return; }
+
+    int   joint = 0;
+    float error = 0.0f;
+    if (!parse_prefixed_int(tokens[0], joint))   { return; }
+    if (!parse_prefixed_float(tokens[1], error)) { return; }
+
+    std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    if (cb_lost_steps_) { cb_lost_steps_(joint, error); }
 }
 
 // @9 V0

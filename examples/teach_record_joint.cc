@@ -1,3 +1,6 @@
+// Copyright 2026 Jack Sidman Smith
+// Licensed under the MIT License. See LICENSE in project root.
+//
 // teach_record_joint.cc — put the arm in passive mode, record joint angles
 // (base, left, right) at ~20 Hz to a file, then re-engage motors.
 //
@@ -52,7 +55,7 @@ static void write_file(const std::string& path,
     const auto now_t  = std::chrono::system_clock::to_time_t(now);
     const auto now_tm = *std::localtime(&now_t);
 
-    f << "# libuarm teach recording (joint space)\n";
+    f << "# libswiftpro teach recording (joint space)\n";
     f << "# recorded: " << std::put_time(&now_tm, "%Y-%m-%d %H:%M:%S") << "\n";
     f << "# port: " << port << "\n";
     f << "# samples: " << samples.size() << "\n";

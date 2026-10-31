@@ -1,4 +1,4 @@
-// uarm.cc
+// swiftpro.cc
 // Copyright 2026 Jack Sidman Smith
 // Licensed under the MIT License. See LICENSE in project root.
 
@@ -100,87 +100,151 @@ Swift::~Swift()
 
 bool Swift::connect(const std::string& port, uint32_t baudrate)
 {
-    disconnect();
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+    teardown();
     try {
         ser_.setPort(port);
         ser_.setBaudrate(baudrate);
         auto timeout = serial::Timeout::simpleTimeout(1000);
         ser_.setTimeout(timeout);
         ser_.open();
-        ser_.setRTS(true);
-        ser_.setDTR(true);
 
         if (!ser_.isOpen()) {
-            std::cerr << "[uarm] failed to open " << port << "\n";
+            std::cerr << "[swiftpro] failed to open " << port << "\n";
             return false;
         }
 
-        commander_ = std::make_unique<Commander>(ser_);
-        receiver_  = std::make_unique<Receiver>(ser_, *commander_);
+        try {
+            ser_.setRTS(true);
+            ser_.setDTR(true);
+        } catch (const std::exception& e) {
+            // Not every port has modem lines; the link works without them.
+            std::cerr << "[swiftpro] RTS/DTR not set: " << e.what() << "\n";
+        }
 
-        receiver_->start();
-        commander_->start();
+        auto commander = std::make_shared<Commander>(ser_);
+        auto receiver  = std::make_shared<Receiver>(ser_, *commander);
 
-        std::cerr << "[uarm] connected to " << port << "\n";
+        receiver->start();
+        commander->start();
+
+        {
+            std::lock_guard<std::mutex> lock(link_mutex_);
+            commander_ = std::move(commander);
+            receiver_  = std::move(receiver);
+        }
+
+        std::cerr << "[swiftpro] connected to " << port << "\n";
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "[uarm] connect error: " << e.what() << "\n";
+        std::cerr << "[swiftpro] connect error: " << e.what() << "\n";
         return false;
     }
 }
 
 void Swift::disconnect()
 {
-    if (commander_) { commander_->stop(); commander_.reset(); }
-    if (receiver_)  { receiver_->stop();  receiver_.reset();  }
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+    teardown();
+}
+
+void Swift::teardown()
+{
+    std::shared_ptr<Commander> commander;
+    std::shared_ptr<Receiver>  receiver;
+    {
+        std::lock_guard<std::mutex> lock(link_mutex_);
+        commander = std::move(commander_);
+        receiver  = std::move(receiver_);
+        commander_.reset();
+        receiver_.reset();
+    }
+
+    // The receiver first: it calls into the commander.
+    if (receiver)  { receiver->stop(); }
+    if (commander) { commander->stop(); }
+
     if (ser_.isOpen()) {
-        ser_.close();
-        std::cerr << "[uarm] disconnected\n";
+        try {
+            ser_.close();
+        } catch (const std::exception& e) {
+            std::cerr << "[swiftpro] close error: " << e.what() << "\n";
+        }
+        std::cerr << "[swiftpro] disconnected\n";
     }
 }
 
 bool Swift::is_connected() const
 {
-    return ser_.isOpen();
+    const auto receiver = current_receiver();
+    return receiver && receiver->link_ok();
+}
+
+std::shared_ptr<Commander> Swift::current_commander() const
+{
+    std::lock_guard<std::mutex> lock(link_mutex_);
+    return commander_;
+}
+
+std::shared_ptr<Receiver> Swift::current_receiver() const
+{
+    std::lock_guard<std::mutex> lock(link_mutex_);
+    return receiver_;
 }
 
 // ── Event callbacks ──────────────────────────────────────────────────────
 
 void Swift::on_position(PositionCallback cb)
 {
-    if (receiver_) { receiver_->on_position(std::move(cb)); }
+    if (const auto r = current_receiver()) { r->on_position(std::move(cb)); }
 }
 
 void Swift::on_joint(JointCallback cb)
 {
-    if (receiver_) { receiver_->on_joint(std::move(cb)); }
+    if (const auto r = current_receiver()) { r->on_joint(std::move(cb)); }
 }
 
 void Swift::on_motion_complete(MotionCompleteCallback cb)
 {
-    if (receiver_) { receiver_->on_motion_complete(std::move(cb)); }
+    if (const auto r = current_receiver()) { r->on_motion_complete(std::move(cb)); }
 }
 
 void Swift::on_limit_switch(LimitSwitchCallback cb)
 {
-    if (receiver_) { receiver_->on_limit_switch(std::move(cb)); }
+    if (const auto r = current_receiver()) { r->on_limit_switch(std::move(cb)); }
 }
 
 void Swift::on_power(PowerCallback cb)
 {
-    if (receiver_) { receiver_->on_power(std::move(cb)); }
+    if (const auto r = current_receiver()) { r->on_power(std::move(cb)); }
+}
+
+void Swift::on_lost_steps(LostStepsCallback cb)
+{
+    if (const auto r = current_receiver()) { r->on_lost_steps(std::move(cb)); }
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────
+
+void Swift::send_cmd(const std::string& cmd,
+                     std::function<void(bool, const std::string&)> cb)
+{
+    const auto commander = current_commander();
+    if (!commander) {
+        if (cb) { cb(false, "NOT_CONNECTED"); }
+        return;
+    }
+    commander->send(cmd, std::move(cb));
+}
 
 void Swift::cmd_void(const std::string& cmd,
                      std::function<void(VoidResult)> cb)
 {
     if (!cb) {
-        commander_->send(cmd);
+        send_cmd(cmd, nullptr);
         return;
     }
-    commander_->send(cmd, [cb](bool ok, const std::string& resp) {
+    send_cmd(cmd, [cb](bool ok, const std::string& resp) {
         cb(ok ? VoidResult::ok() : VoidResult::err(resp));
     });
 }
@@ -188,7 +252,7 @@ void Swift::cmd_void(const std::string& cmd,
 void Swift::query_vec3(const std::string& cmd,
                        std::function<void(VecResult)> cb)
 {
-    commander_->send(cmd, [cb](bool /*ok*/, const std::string& resp) {
+    send_cmd(cmd, [cb](bool /*ok*/, const std::string& resp) {
         cb(parse_vec3_response(resp));
     });
 }
@@ -196,7 +260,7 @@ void Swift::query_vec3(const std::string& cmd,
 void Swift::query_int(const std::string& cmd,
                       std::function<void(IntResult)> cb)
 {
-    commander_->send(cmd, [cb](bool /*ok*/, const std::string& resp) {
+    send_cmd(cmd, [cb](bool /*ok*/, const std::string& resp) {
         cb(parse_int_response(resp));
     });
 }
@@ -204,7 +268,7 @@ void Swift::query_int(const std::string& cmd,
 void Swift::query_float(const std::string& cmd,
                         std::function<void(FloatResult)> cb)
 {
-    commander_->send(cmd, [cb](bool /*ok*/, const std::string& resp) {
+    send_cmd(cmd, [cb](bool /*ok*/, const std::string& resp) {
         cb(parse_float_response(resp));
     });
 }
@@ -248,7 +312,7 @@ static R sync_call(std::function<void(std::function<void(R)>)> async_fn,
 void Swift::set_report_interval(float interval_s,
                                 std::function<void(VoidResult)> cb)
 {
-    char _ri[32]; std::snprintf(_ri,sizeof(_ri),"M2120 V%.2f",interval_s); cmd_void(_ri,std::move(cb));
+    char _ri[32]; std::snprintf(_ri,sizeof(_ri),"M2120 V%.3f",interval_s); cmd_void(_ri,std::move(cb));
 }
 
 VoidResult Swift::set_report_interval_sync(float interval_s, float timeout_s)
@@ -267,6 +331,18 @@ VoidResult Swift::set_motion_report_sync(bool on, float timeout_s)
 {
     return sync_call<VoidResult>(
         [this, on](auto cb) { set_motion_report(on, cb); },
+        timeout_s);
+}
+
+void Swift::set_streaming(bool on, std::function<void(VoidResult)> cb)
+{
+    cmd_void(std::string("M2126 V") + (on ? "1" : "0"), std::move(cb));
+}
+
+VoidResult Swift::set_streaming_sync(bool on, float timeout_s)
+{
+    return sync_call<VoidResult>(
+        [this, on](auto cb) { set_streaming(on, cb); },
         timeout_s);
 }
 
@@ -435,7 +511,7 @@ VoidResult Swift::reset_sync(float x, float y, float z, float speed,
         [this, x, y, z, speed](auto cb) { reset(x, y, z, speed, cb); },
         timeout_s);
 }
-// ── Raw GRBL command ─────────────────────────────────────────────────────
+// ── Raw command ─────────────────────────────────────────────────────
 
 void Swift::send_raw(const std::string& cmd,
                      std::function<void(VoidResult)> cb)
@@ -445,7 +521,9 @@ void Swift::send_raw(const std::string& cmd,
 
 VoidResult Swift::send_raw_sync(const std::string& cmd, float timeout_s)
 {
-    auto r = commander_->send_sync(cmd, timeout_s);
+    const auto commander = current_commander();
+    if (!commander) { return VoidResult::err("NOT_CONNECTED"); }
+    auto r = commander->send_sync(cmd, timeout_s);
     if (!r) { return VoidResult::err(r.error()); }
     return r->rfind("ok", 0) == 0 ? VoidResult::ok() : VoidResult::err(*r);
 }
@@ -684,6 +762,7 @@ void Swift::get_device_info(std::function<void(InfoResult)> cb)
     struct State {
         std::mutex                  mu;
         std::array<std::string, 5>  info{};
+        std::string                 error;
         int                         count{0};
         std::function<void(InfoResult)> cb;
     };
@@ -696,9 +775,10 @@ void Swift::get_device_info(std::function<void(InfoResult)> cb)
     };
 
     for (int i = 0; i < 5; ++i) {
-        commander_->send(cmds[i],
-            [state, i](bool /*ok*/, const std::string& resp) {
+        send_cmd(cmds[i],
+            [state, i](bool ok, const std::string& resp) {
                 // Strip "ok V" prefix — value starts after first space+char.
+                // An empty UID is "ok V".
                 std::string val;
                 auto space = resp.find(' ');
                 if (space != std::string::npos && space + 1 < resp.size()) {
@@ -707,8 +787,11 @@ void Swift::get_device_info(std::function<void(InfoResult)> cb)
 
                 std::lock_guard<std::mutex> lock(state->mu);
                 state->info[i] = val;
+                if (!ok && state->error.empty()) { state->error = resp; }
                 if (++state->count == 5) {
-                    state->cb(InfoResult::ok(state->info));
+                    state->cb(state->error.empty()
+                              ? InfoResult::ok(state->info)
+                              : InfoResult::err(state->error));
                 }
             });
     }

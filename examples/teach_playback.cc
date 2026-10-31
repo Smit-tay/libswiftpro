@@ -1,3 +1,6 @@
+// Copyright 2026 Jack Sidman Smith
+// Licensed under the MIT License. See LICENSE in project root.
+//
 // teach_playback.cc — replay a teach recording captured by teach_record.
 //
 // Usage: teach_playback [port] [input_file] [speed_factor]
@@ -6,7 +9,7 @@
 //   speed_factor  playback speed multiplier (default 1.0, 2.0 = double speed)
 //
 // Positions are sent async to the firmware planner. The inter-sample delay
-// from the recording is honoured as closely as possible. The GRBL planner
+// from the recording is honoured as closely as possible. The firmware planner
 // buffers and smooths the motion.
 
 #include <algorithm>
@@ -23,6 +26,12 @@
 #include "swiftpro/swiftpro.h"
 
 // ---------------------------------------------------------------------------
+
+// F is 80 deg/min of joint-space speed per unit. At about 200 mm reach 1 deg is
+// about 3.5 mm, so 1 F is roughly 280 mm/min. An estimate: playback timing comes
+// from the sleeps, and this only has to be near. F100 is the firmware's default.
+static constexpr float MM_PER_MIN_PER_F = 280.0f;
+static constexpr float MAX_PLAYBACK_F   = 100.0f;
 
 struct Sample {
     int64_t t_ms;
@@ -125,6 +134,7 @@ int main(int argc, char* argv[])
     const auto& first = samples.front();
     arm.set_position_sync(first.x, first.y, first.z, 50.0f);
     arm.set_wrist_sync(first.w, 1000.0f);
+    arm.set_streaming_sync(true);
     std::cout << "At start position. Beginning playback...\n\n";
 
     // Playback loop.
@@ -137,7 +147,7 @@ int main(int argc, char* argv[])
 
         // Send position async — firmware planner queues and smooths.
         // Speed parameter: use inter-sample distance / inter-sample time
-        // as a rough mm/min estimate, clamped to sane range.
+        // converted to F, clamped to a sane range.
         float speed = 50.0f;
         if (i + 1 < samples.size()) {
             const auto& next = samples[i + 1];
@@ -149,7 +159,7 @@ int main(int argc, char* argv[])
                 const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
                 // dist in mm, dt in ms → mm/s → mm/min
                 const float mms  = dist / (dt_ms / 1000.0f);
-                speed = std::clamp(mms * 60.0f * speed_factor, 10.0f, 50000.0f);
+                speed = std::clamp(mms * 60.0f * speed_factor / MM_PER_MIN_PER_F, 1.0f, MAX_PLAYBACK_F);
             }
         }
 
@@ -159,7 +169,7 @@ int main(int argc, char* argv[])
         std::cout << "\r  sample " << i + 1 << "/" << samples.size()
                   << "  (" << std::fixed << std::setprecision(1)
                   << s.x << ", " << s.y << ", " << s.z << ") mm"
-                  << "  speed=" << std::setprecision(0) << speed << "mm/min   "
+                  << "  speed=" << std::setprecision(0) << speed << " F   "
                   << std::flush;
 
         // Sleep for inter-sample interval adjusted by speed_factor.
@@ -176,8 +186,8 @@ int main(int argc, char* argv[])
 
     std::cout << "\n\nPlayback complete. Waiting for motion to finish...\n";
 
-    // Wait for final motion to complete.
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    // A non-motion command is answered once the arm is idle.
+    arm.set_streaming_sync(false, 60.0f);
 
     arm.disconnect();
     std::cout << "Done.\n";

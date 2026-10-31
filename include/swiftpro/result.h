@@ -2,7 +2,7 @@
 // Copyright 2026 Jack Sidman Smith
 // Licensed under the MIT License. See LICENSE in project root.
 //
-// Result<T> — a simple value-or-error type for libuarm API returns.
+// Result<T> — a simple value-or-error type for libswiftpro API returns.
 //
 // Usage:
 //   Result<float> r = get_something();

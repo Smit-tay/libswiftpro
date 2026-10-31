@@ -37,13 +37,16 @@ class Commander;
 // @3 — periodic position report: x, y, z, wrist_angle (degrees)
 using PositionCallback       = std::function<void(float x, float y, float z, float wrist)>;
 
-// @3 extended — joint angles included when firmware is extended.
-// b=base, l=left, r=right (firmware degrees)
+// @3 joint angles: b=base with 0 = straight ahead, l=left, r=right (degrees)
 using JointCallback          = std::function<void(float b, float l, float r)>;
 
 using MotionCompleteCallback = std::function<void()>;
 using LimitSwitchCallback    = std::function<void(bool state)>;
 using PowerCallback          = std::function<void(bool on)>;
+
+// @8 — lost steps: the arm has braked and its running commands fail with E25.
+// joint: 0=base, 1=left, 2=right. error_deg: step tally minus encoder.
+using LostStepsCallback      = std::function<void(int joint, float error_deg)>;
 
 class Receiver
 {
@@ -64,6 +67,11 @@ public:
     void on_motion_complete(MotionCompleteCallback cb);
     void on_limit_switch(LimitSwitchCallback cb);
     void on_power(PowerCallback cb);
+    void on_lost_steps(LostStepsCallback cb);
+
+    // False once a serial error has ended the receiver thread (e.g. the USB
+    // cable was pulled). Recovery is a new Swift::connect().
+    bool link_ok() const { return !link_lost_; }
 
 private:
     void recv_loop();
@@ -75,6 +83,7 @@ private:
     void parse_at3(const std::string& payload);
     void parse_at5(const std::string& payload);
     void parse_at6(const std::string& payload);
+    void parse_at8(const std::string& payload);
     void parse_at9(const std::string& payload);
 
     serial::Serial& ser_;
@@ -82,6 +91,7 @@ private:
 
     std::thread       recv_thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> link_lost_{false};
 
     // Event callbacks — protected by callbacks_mutex_.
     std::mutex               callbacks_mutex_;
@@ -90,6 +100,7 @@ private:
     MotionCompleteCallback   cb_motion_complete_;
     LimitSwitchCallback      cb_limit_switch_;
     PowerCallback            cb_power_;
+    LostStepsCallback        cb_lost_steps_;
 };
 
 } // namespace swiftpro

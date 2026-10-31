@@ -22,10 +22,14 @@
 //     This back-pressures the writer to firmware throughput without ever
 //     issuing false TIMEOUT errors to callers whose commands the firmware
 //     is actually processing.
+//   - A reply that will never come must not hold a slot for good. All pending
+//     commands fail on a firmware reboot or link loss (fail_pending). While the
+//     map is full, entries unanswered for stale_after_s are failed with TIMEOUT.
 
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -45,10 +49,14 @@ namespace swiftpro {
 static constexpr size_t QUEUE_CAPACITY = 32;
 
 // Maximum number of commands awaiting a response from the firmware.
-static constexpr size_t PENDING_CAPACITY = 16;
+static constexpr size_t PENDING_CAPACITY = 7;   // 7 x ~36 bytes fits the firmware's 256-byte RX buffer
 
 // Default command timeout in seconds.
 static constexpr float DEFAULT_TIMEOUT_S = 5.0f;
+
+// How long a full pending map waits on an unanswered command before failing it.
+// Longer than any sensible move: a move's reply comes only when it has finished.
+static constexpr float STALE_PENDING_S = 120.0f;
 
 // Response callback type. Called by Receiver on the recv thread when the
 // firmware responds to a sequenced command.
@@ -57,7 +65,7 @@ using ResponseCallback = std::function<void(bool ok, const std::string& response
 class Commander
 {
 public:
-    explicit Commander(serial::Serial& ser);
+    explicit Commander(serial::Serial& ser, float stale_after_s = STALE_PENDING_S);
     ~Commander();
 
     // Non-copyable, non-movable.
@@ -70,6 +78,7 @@ public:
 
     // Enqueue a command. Never blocks. cb is called when the firmware responds.
     // If cb is nullptr the command is fire-and-forget (no sequence number).
+    // After stop(), cb is called at once with "NOT_CONNECTED".
     void send(const std::string& cmd, ResponseCallback cb = nullptr);
 
     // Blocking variant. Enqueues the command and waits up to timeout_s seconds
@@ -83,8 +92,11 @@ public:
     bool deliver_response(uint32_t seq, bool ok, const std::string& response);
 
     // Called by Receiver for fire-and-forget commands (no sequence number).
-    // Not used for matching — just informational.
+    // Not used for matching — just informational. response must not be empty.
     void on_unsequenced_response(const std::string& response);
+
+    // Fails every command awaiting a response: their replies will never come.
+    void fail_pending(const std::string& reason);
 
 private:
     struct PendingCmd
@@ -94,13 +106,23 @@ private:
         ResponseCallback cb;        // nullptr = fire-and-forget
     };
 
+    struct Pending
+    {
+        ResponseCallback                      cb;
+        std::chrono::steady_clock::time_point written;
+    };
+
     // Writer thread entry point.
     void writer_loop();
 
-    // Allocate next sequence number (1-based, wraps at UINT32_MAX).
+    // Waits for room in the pending map. False if stopping.
+    bool reserve_slot();
+
+    // Allocate next sequence number (1 to 999999999, then wraps).
     uint32_t next_seq();
 
     serial::Serial&   ser_;
+    const float       stale_after_s_;
 
     // Outbound queue — commands waiting to be written.
     std::deque<PendingCmd>  queue_;
@@ -109,9 +131,9 @@ private:
 
     // Pending map — commands written but not yet responded to.
     // pending_cv_ signals when the map drops below capacity (writer wakes).
-    std::unordered_map<uint32_t, ResponseCallback> pending_;
-    std::mutex                                     pending_mutex_;
-    std::condition_variable                        pending_cv_;
+    std::unordered_map<uint32_t, Pending> pending_;
+    std::mutex                            pending_mutex_;
+    std::condition_variable               pending_cv_;
 
     std::thread       writer_thread_;
     std::atomic<bool> running_{false};

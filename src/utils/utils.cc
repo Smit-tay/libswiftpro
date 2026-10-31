@@ -1,5 +1,5 @@
 /*
-* \file uarm/utils.cc
+* \file utils/utils.cc
 # Software License Agreement (MIT License)
 #
 # Copyright (c) 2018, UFACTORY, Inc.

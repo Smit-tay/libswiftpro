@@ -1,3 +1,6 @@
+// Copyright 2026 Jack Sidman Smith
+// Licensed under the MIT License. See LICENSE in project root.
+//
 // teach_record.cc — put the arm in passive (backdriveable) mode, record
 // position at ~20 Hz to a file, then re-engage motors and disconnect.
 //
@@ -32,11 +35,8 @@ struct Sample {
 
 static std::vector<Sample> g_samples;
 static std::mutex          g_mutex;
-static std::atomic<bool>   g_recording{false};
 static std::atomic<bool>   g_running{true};
 
-static std::chrono::steady_clock::time_point g_start;
-static std::atomic<bool>                     g_started{false};
 
 // ---------------------------------------------------------------------------
 
@@ -56,7 +56,7 @@ static void write_file(const std::string& path, const std::string& port)
 
     std::lock_guard<std::mutex> lock(g_mutex);
 
-    f << "# libuarm teach recording\n";
+    f << "# libswiftpro teach recording\n";
     f << "# recorded: " << std::put_time(&now_tm, "%Y-%m-%d %H:%M:%S") << "\n";
     f << "# port: " << port << "\n";
     f << "# samples: " << g_samples.size() << "\n";
@@ -111,51 +111,39 @@ int main(int argc, char* argv[])
     std::cout << "Connected. Waiting for firmware boot...\n";
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
-    arm.on_position([](float x, float y, float z, float w) {
-        if (!g_recording.load()) { return; }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (!g_started.exchange(true)) { g_start = now; }
-
-        const int64_t t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - g_start).count();
-
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_samples.push_back({t_ms, x, y, z, w});
-    });
-
-    // 20 Hz report interval.
-    arm.set_report_interval_sync(0.05f);
-
     std::cout << "Detaching servos (passive/teach mode)...\n";
     arm.set_servo_detach_sync(-1);
     std::cout << "Arm is now backdriveable. Move it by hand.\n";
     std::cout << "Recording to: " << outfile << "\n";
     std::cout << "Press Ctrl-C to stop.\n\n";
 
-    g_recording.store(true);
+    // Poll the encoders. The @3 report comes from the step tally, which does not
+    // follow joints moved by hand.
+    constexpr auto INTERVAL = std::chrono::milliseconds(50);
+    const auto     start    = std::chrono::steady_clock::now();
 
-    // Status loop — sleep_for is interrupted by SIGINT due to no SA_RESTART.
     while (g_running.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        if (!g_running.load()) { break; }
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (!g_samples.empty()) {
-            const auto& s = g_samples.back();
+        const auto now = std::chrono::steady_clock::now();
+        const auto pos = arm.get_position_sync(1.0f);
+        const auto w   = arm.get_servo_angle_sync(3, 1.0f);
+        if (pos && w) {
+            const int64_t t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start).count();
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_samples.push_back({t_ms, pos->at(0), pos->at(1), pos->at(2), *w});
             std::cout << "\r  samples: " << g_samples.size()
                       << "  pos: (" << std::fixed << std::setprecision(1)
-                      << s.x << ", " << s.y << ", " << s.z << ") mm   "
-                      << std::flush;
+                      << pos->at(0) << ", " << pos->at(1) << ", " << pos->at(2)
+                      << ") mm   " << std::flush;
         }
+        std::this_thread::sleep_until(now + INTERVAL);
     }
 
-    g_recording.store(false);
     std::cout << "\n";
 
     // Cleanup — always runs, no atexit.
     std::cout << "Re-attaching servos...\n";
     arm.set_servo_attach_sync(-1);
-    arm.set_report_interval_sync(0.0f);
     arm.disconnect();
 
     write_file(outfile, port);

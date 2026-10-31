@@ -1,3 +1,6 @@
+// Copyright 2026 Jack Sidman Smith
+// Licensed under the MIT License. See LICENSE in project root.
+//
 // basic_move.cc — connect, home, visit two waypoints, disconnect.
 //
 // Usage: basic_move [port]
