@@ -22,6 +22,8 @@
 //     This back-pressures the writer to firmware throughput without ever
 //     issuing false TIMEOUT errors to callers whose commands the firmware
 //     is actually processing.
+//   - Urgent commands (send_urgent) overtake both: a stop must not wait for
+//     the moves it is meant to stop.
 //   - A reply that will never come must not hold a slot for good. All pending
 //     commands fail on a firmware reboot or link loss (fail_pending). While the
 //     map is full, entries unanswered for stale_after_s are failed with TIMEOUT.
@@ -81,6 +83,12 @@ public:
     // After stop(), cb is called at once with "NOT_CONNECTED".
     void send(const std::string& cmd, ResponseCallback cb = nullptr);
 
+    // Enqueue a command ahead of everything unwritten, ignoring the pending
+    // capacity: the writer sends it even while waiting for a free slot.
+    // drop_queued fails every unwritten command with "STOPPED"; otherwise they
+    // would be written as soon as the stop freed the pending map.
+    void send_urgent(const std::string& cmd, ResponseCallback cb, bool drop_queued);
+
     // Blocking variant. Enqueues the command and waits up to timeout_s seconds
     // for the firmware response. Returns the raw response string on success.
     Result<std::string> send_sync(const std::string& cmd,
@@ -104,6 +112,7 @@ private:
         uint32_t         seq;
         std::string      cmd;       // already formatted with #N prefix if sequenced
         ResponseCallback cb;        // nullptr = fire-and-forget
+        uint64_t         generation = 0;
     };
 
     struct Pending
@@ -115,8 +124,15 @@ private:
     // Writer thread entry point.
     void writer_loop();
 
-    // Waits for room in the pending map. False if stopping.
+    // Waits for room in the pending map, sending urgent commands meanwhile.
+    // False if stopping.
     bool reserve_slot();
+
+    // Writes every urgent command.
+    void write_urgent();
+
+    // Registers a sequenced command as pending and writes it to serial.
+    void write_entry(PendingCmd& entry);
 
     // Allocate next sequence number (1 to 999999999, then wraps).
     uint32_t next_seq();
@@ -126,6 +142,9 @@ private:
 
     // Outbound queue — commands waiting to be written.
     std::deque<PendingCmd>  queue_;
+    std::deque<PendingCmd>  urgent_;
+    uint64_t                generation_ = 0;  // bumped by a drop_queued
+    std::atomic<bool>       urgent_waiting_{false};
     std::mutex              queue_mutex_;
     std::condition_variable queue_cv_;
 

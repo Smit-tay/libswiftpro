@@ -523,6 +523,71 @@ void stop_during_move()
     CHECK_EQ(second.get_future().get(), std::string("E25"));
 }
 
+// A stop overtakes a full window, and what was queued behind it never runs.
+void stop_overtakes_queue()
+{
+    std::vector<std::string> moves;
+    std::mutex mutex;
+    FakeArm* self = nullptr;
+    FakeArm fake([&](const Line& l) -> std::optional<std::string> {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (l.body[0] == 'G') { moves.push_back(l.seq); return std::nullopt; }
+        self->say("$" + l.seq + " ok");
+        for (const auto& seq : moves) { self->say("$" + seq + " E25"); }
+        return std::nullopt;
+    });
+    self = &fake;
+    swiftpro::Swift arm;
+    CHECK(arm.connect(fake.path()));
+
+    const int total = static_cast<int>(swiftpro::PENDING_CAPACITY) + 5;
+    std::atomic<int> stopped{0};
+    for (int i = 0; i < total; ++i) {
+        arm.set_position(200, 0, 150, 50, false, [&](swiftpro::VoidResult r) {
+            if (!r && r.error() == "STOPPED") { ++stopped; }
+        });
+    }
+    CHECK(wait_until([&] { return fake.lines().size() == swiftpro::PENDING_CAPACITY; }));
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(arm.motion_reset_sync());
+    CHECK(std::chrono::steady_clock::now() - start < 200ms);
+
+    // Nothing queued gets written after the stop.
+    std::this_thread::sleep_for(300ms);
+    CHECK_EQ(stopped.load(), 5);
+    CHECK_EQ(fake.lines().size(), swiftpro::PENDING_CAPACITY + 1);
+    arm.disconnect();
+}
+
+// Resume must get past the moves that a hold keeps unanswered.
+void resume_overtakes_queue()
+{
+    FakeArm* self = nullptr;
+    FakeArm fake([&](const Line& l) -> std::optional<std::string> {
+        if (l.body[0] == 'G') { return std::nullopt; }
+        self->say("$" + l.seq + " ok");
+        return std::nullopt;
+    });
+    self = &fake;
+    swiftpro::Swift arm;
+    CHECK(arm.connect(fake.path()));
+
+    for (size_t i = 0; i < swiftpro::PENDING_CAPACITY + 2; ++i) {
+        arm.set_position(200, 0, 150, 50, false);
+    }
+    std::atomic<int> answered{0};
+    for (size_t i = 0; i < swiftpro::PENDING_CAPACITY + 2; ++i) {
+        arm.set_position(200, 0, 150, 50, false, [&](swiftpro::VoidResult) { ++answered; });
+    }
+    CHECK(wait_until([&] { return fake.lines().size() >= swiftpro::PENDING_CAPACITY; }));
+
+    CHECK(arm.pause_motion_sync(1.0f));
+    CHECK(arm.resume_motion_sync(1.0f));
+    arm.disconnect();
+    CHECK_EQ(answered.load(), static_cast<int>(swiftpro::PENDING_CAPACITY) + 2);
+}
+
 // A reboot loses everything in flight: fail it now, and carry on.
 void reboot_fails_pending()
 {
@@ -723,6 +788,8 @@ int main(int argc, char* argv[])
         {"reply_matching", reply_matching},
         {"report_events", report_events},
         {"stop_during_move", stop_during_move},
+        {"stop_overtakes_queue", stop_overtakes_queue},
+        {"resume_overtakes_queue", resume_overtakes_queue},
         {"reboot_fails_pending", reboot_fails_pending},
         {"late_reply_after_timeout", late_reply_after_timeout},
         {"bare_error_keeps_running", bare_error_keeps_running},

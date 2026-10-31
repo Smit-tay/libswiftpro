@@ -49,6 +49,8 @@ void Commander::stop()
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         unsent.swap(queue_);
+        for (auto& entry : urgent_) { unsent.push_back(std::move(entry)); }
+        urgent_.clear();
     }
     for (auto& entry : unsent) {
         if (entry.cb) { entry.cb(false, "DISCONNECTED"); }
@@ -85,6 +87,7 @@ void Commander::send(const std::string& cmd, ResponseCallback cb)
                 evicted = std::move(queue_.front().cb);
                 queue_.pop_front();
             }
+            entry.generation = generation_;
             queue_.push_back(std::move(entry));
             queue_cv_.notify_one();
         }
@@ -92,6 +95,46 @@ void Commander::send(const std::string& cmd, ResponseCallback cb)
 
     if (evicted) {
         evicted(false, running_ ? "QUEUE_FULL" : "NOT_CONNECTED");
+    }
+}
+
+void Commander::send_urgent(const std::string& cmd, ResponseCallback cb, bool drop_queued)
+{
+    PendingCmd entry;
+    entry.seq = cb ? next_seq() : 0;
+    entry.cmd = cb ? "#" + std::to_string(entry.seq) + cmd : cmd;
+    entry.cb  = std::move(cb);
+
+    std::deque<PendingCmd> dropped;
+    bool refused = false;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (running_) {
+            if (drop_queued) {
+                dropped.swap(queue_);
+                ++generation_;
+            }
+            urgent_.push_back(std::move(entry));
+            urgent_waiting_ = true;
+        } else {
+            refused = true;
+        }
+    }
+
+    if (refused) {
+        if (entry.cb) { entry.cb(false, "NOT_CONNECTED"); }
+        return;
+    }
+
+    // The writer waits on one of these two.
+    queue_cv_.notify_all();
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+    }
+    pending_cv_.notify_all();
+
+    for (auto& queued : dropped) {
+        if (queued.cb) { queued.cb(false, "STOPPED"); }
     }
 }
 
@@ -175,14 +218,19 @@ void Commander::writer_loop()
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
             queue_cv_.wait(lock, [this] {
-                return !queue_.empty() || !running_;
+                return !queue_.empty() || !urgent_.empty() || !running_;
             });
 
             if (!running_) { break; }
 
-            entry = std::move(queue_.front());
-            queue_.pop_front();
+            if (urgent_.empty()) {
+                entry = std::move(queue_.front());
+                queue_.pop_front();
+            }
         }
+
+        write_urgent();
+        if (entry.cmd.empty()) { continue; }
 
         // Step 2 — for sequenced commands, reserve a slot in the pending map.
         // If the map is at capacity, wait for a response to free one.
@@ -193,35 +241,72 @@ void Commander::writer_loop()
                 entry.cb(false, "DISCONNECTED");
                 return;
             }
-            std::lock_guard<std::mutex> lock(pending_mutex_);
-            pending_[entry.seq] = Pending{std::move(entry.cb),
-                                          std::chrono::steady_clock::now()};
+
+            // A stop may have come while this command waited for its slot.
+            bool dropped = false;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                dropped = entry.generation != generation_;
+            }
+            if (dropped) {
+                entry.cb(false, "STOPPED");
+                continue;
+            }
         }
 
-        // Step 3 — write to serial. Append newline if not present.
-        std::string line = entry.cmd;
-        if (line.empty() || line.back() != '\n') { line += '\n'; }
+        // Step 3 — write to serial.
+        write_entry(entry);
+    }
+}
 
-        try {
-            ser_.write(line);
-        } catch (const std::exception& e) {
-            std::cerr << "[swiftpro::Commander] serial write error: " << e.what() << "\n";
-
-            // Fire the callback with an error if it was registered, and
-            // remove the pending entry so the slot is recycled.
-            if (entry.seq != 0) {
-                ResponseCallback cb;
-                {
-                    std::lock_guard<std::mutex> lock(pending_mutex_);
-                    auto it = pending_.find(entry.seq);
-                    if (it != pending_.end()) {
-                        cb = std::move(it->second.cb);
-                        pending_.erase(it);
-                    }
-                }
-                pending_cv_.notify_one();
-                if (cb) { cb(false, "IO_ERROR"); }
+void Commander::write_urgent()
+{
+    for (;;) {
+        PendingCmd entry;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (urgent_.empty()) {
+                urgent_waiting_ = false;
+                return;
             }
+            entry = std::move(urgent_.front());
+            urgent_.pop_front();
+        }
+        write_entry(entry);
+    }
+}
+
+void Commander::write_entry(PendingCmd& entry)
+{
+    if (entry.seq != 0) {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        pending_[entry.seq] = Pending{std::move(entry.cb),
+                                      std::chrono::steady_clock::now()};
+    }
+
+    // Append newline if not present.
+    std::string line = entry.cmd;
+    if (line.empty() || line.back() != '\n') { line += '\n'; }
+
+    try {
+        ser_.write(line);
+    } catch (const std::exception& e) {
+        std::cerr << "[swiftpro::Commander] serial write error: " << e.what() << "\n";
+
+        // Fire the callback with an error if it was registered, and
+        // remove the pending entry so the slot is recycled.
+        if (entry.seq != 0) {
+            ResponseCallback cb;
+            {
+                std::lock_guard<std::mutex> lock(pending_mutex_);
+                auto it = pending_.find(entry.seq);
+                if (it != pending_.end()) {
+                    cb = std::move(it->second.cb);
+                    pending_.erase(it);
+                }
+            }
+            pending_cv_.notify_one();
+            if (cb) { cb(false, "IO_ERROR"); }
         }
     }
 }
@@ -232,7 +317,16 @@ bool Commander::reserve_slot()
 
     std::unique_lock<std::mutex> lock(pending_mutex_);
     while (running_ && pending_.size() >= PENDING_CAPACITY) {
-        pending_cv_.wait_for(lock, std::chrono::milliseconds(250));
+        if (urgent_waiting_) {
+            lock.unlock();
+            write_urgent();
+            lock.lock();
+            continue;
+        }
+
+        pending_cv_.wait_for(lock, std::chrono::milliseconds(250), [this] {
+            return urgent_waiting_ || !running_ || pending_.size() < PENDING_CAPACITY;
+        });
 
         // Slots whose reply never came (its line was lost) would otherwise
         // block the writer for good. Only checked when the map is full.

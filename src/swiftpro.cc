@@ -249,6 +249,25 @@ void Swift::cmd_void(const std::string& cmd,
     });
 }
 
+void Swift::cmd_urgent(const std::string& cmd,
+                       std::function<void(VoidResult)> cb,
+                       bool drop_queued)
+{
+    std::function<void(bool, const std::string&)> response;
+    if (cb) {
+        response = [cb](bool ok, const std::string& resp) {
+            cb(ok ? VoidResult::ok() : VoidResult::err(resp));
+        };
+    }
+
+    const auto commander = current_commander();
+    if (!commander) {
+        if (response) { response(false, "NOT_CONNECTED"); }
+        return;
+    }
+    commander->send_urgent(cmd, std::move(response), drop_queued);
+}
+
 void Swift::query_vec3(const std::string& cmd,
                        std::function<void(VecResult)> cb)
 {
@@ -461,7 +480,7 @@ VoidResult Swift::set_wrist_sync(float angle, float speed, float timeout_s)
 
 void Swift::pause_motion(std::function<void(VoidResult)> cb)
 {
-    cmd_void("S1000 V0", std::move(cb));
+    cmd_urgent("S1000 V0", std::move(cb), false);
 }
 
 VoidResult Swift::pause_motion_sync(float timeout_s)
@@ -472,7 +491,7 @@ VoidResult Swift::pause_motion_sync(float timeout_s)
 
 void Swift::resume_motion(std::function<void(VoidResult)> cb)
 {
-    cmd_void("S1000 V1", std::move(cb));
+    cmd_urgent("S1000 V1", std::move(cb), false);
 }
 
 VoidResult Swift::resume_motion_sync(float timeout_s)
@@ -483,7 +502,7 @@ VoidResult Swift::resume_motion_sync(float timeout_s)
 
 void Swift::motion_reset(std::function<void(VoidResult)> cb)
 {
-    cmd_void("S1100", std::move(cb));
+    cmd_urgent("S1100", std::move(cb), true);
 }
 
 VoidResult Swift::motion_reset_sync(float timeout_s)

@@ -10,6 +10,8 @@ foreach(_case
     reply_matching
     report_events
     stop_during_move
+    stop_overtakes_queue
+    resume_overtakes_queue
     reboot_fails_pending
     late_reply_after_timeout
     bare_error_keeps_running

@@ -271,8 +271,8 @@ test suite (`tests/`), which checks the library against the protocol text above.
 | `G2204`, `G2201`, `G2205` | `set_position(relative)`, `set_polar` | F clamped ≤ 100; partial move before E22 | No clamp; path checked first | ok; **speed behaviour changed**, documented in the header |
 | `G2206` | `set_joint_angles` | Supported | Same | ok |
 | `G2202 N V F` | `set_servo_angle`, `set_wrist` | Wrist V wraps | Wrist outside 0–180 is E21 | ok |
-| `S1000` | `pause_motion`, `resume_motion` | Same | Same | ok |
-| `S1100` | `motion_reset` | Wedged in ALARM during motion | Stops, queue gets E25, stays usable | ok |
+| `S1000` | `pause_motion`, `resume_motion` | Same | Same | ok; overtake the host queue |
+| `S1100` | `motion_reset` | Wedged in ALARM during motion | Stops, queue gets E25, stays usable | ok; overtakes the host queue, whose unwritten commands fail with `STOPPED` |
 | `M17`, `M2019` | `set_servo_attach(-1)`, `set_servo_detach(-1)` | Enable/disable all | Same; re-reads encoders; E26 possible | ok |
 | `M2201`, `M2202` | `set_servo_attach`, `set_servo_detach` | M2201 enabled all drivers | One joint; moves E27 until all locked | ok |
 | `M2203` | `get_servo_attach` | N mapping mixed up | N as in G2202 | ok (now correct) |

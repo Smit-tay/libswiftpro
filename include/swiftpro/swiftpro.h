@@ -176,6 +176,8 @@ public:
     VoidResult set_wrist_sync(float angle, float speed,
                               float timeout_s = 30.0f);
 
+    // pause_motion, resume_motion and motion_reset overtake queued commands.
+
     // Feed hold (pause in-flight motion).
     void pause_motion(std::function<void(VoidResult)> cb = nullptr);
     VoidResult pause_motion_sync(float timeout_s = 5.0f);
@@ -184,8 +186,9 @@ public:
     void resume_motion(std::function<void(VoidResult)> cb = nullptr);
     VoidResult resume_motion_sync(float timeout_s = 5.0f);
 
-    // Stop: the arm brakes, every queued command fails with E25, the position is
-    // re-read from the encoders. The arm stays usable.
+    // Stop: the arm brakes, every command the firmware holds fails with E25, every
+    // command not yet written fails with STOPPED, the position is re-read from the
+    // encoders. The arm stays usable.
     void motion_reset(std::function<void(VoidResult)> cb = nullptr);
     VoidResult motion_reset_sync(float timeout_s = 5.0f);
 
@@ -334,6 +337,10 @@ private:
                      std::function<void(FloatResult)> cb);
 
     // Send a void command (response is just "ok" or error).
+    void cmd_urgent(const std::string& cmd,
+                    std::function<void(VoidResult)> cb,
+                    bool drop_queued);
+
     void cmd_void(const std::string& cmd,
                   std::function<void(VoidResult)> cb);
 
